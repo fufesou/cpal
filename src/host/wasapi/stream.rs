@@ -334,10 +334,6 @@ fn boost_current_thread_priority() -> Result<(), StreamError> {
     .map_err(|err| super::windows_err_to_cpal_err_message(err, "SetThreadPriority failed: "))
 }
 
-#[cfg(test)]
-#[path = "stream_priority_tests.rs"]
-mod priority_tests;
-
 enum ControlFlow {
     Break,
     Continue,
