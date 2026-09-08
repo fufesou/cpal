@@ -268,6 +268,8 @@ pub enum StreamError {
     /// The device no longer exists. This can happen if the device is disconnected while the
     /// program is running.
     DeviceNotAvailable,
+    /// The backend interrupted the stream; recreate it to resume capture.
+    StreamInterrupted { err: BackendSpecificError },
     /// See the [`BackendSpecificError`] docs for more information about this error variant.
     BackendSpecific { err: BackendSpecificError },
 }
@@ -275,7 +277,7 @@ pub enum StreamError {
 impl Display for StreamError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BackendSpecific { err } => err.fmt(f),
+            Self::BackendSpecific { err } | Self::StreamInterrupted { err } => err.fmt(f),
             StreamError::DeviceNotAvailable => f.write_str(
                 "The requested device is no longer available. For example, it has been unplugged.",
             ),

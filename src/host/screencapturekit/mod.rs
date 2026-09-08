@@ -20,6 +20,7 @@ pub use enumerate::{
 };
 
 pub mod enumerate;
+mod delegate;
 
 pub fn is_selector_available(cfg: &sc::StreamCfg) -> bool {
     for name in [c"setCapturesAudio:", c"setExcludesCurrentProcessAudio:"] {
@@ -215,13 +216,20 @@ impl Device {
         }
         let windows = ns::Array::new();
         let filter = sc::ContentFilter::with_display_excluding_windows(&self.display, &windows);
-        let sc_stream = sc::Stream::new(&filter, &cfg);
+        let error_callback: delegate::ErrorCallback =
+            std::sync::Arc::new(std::sync::Mutex::new(Box::new(error_callback)));
+        // ScreenCaptureKit can stop capture while the application keeps running.
+        // The observed system-stop trigger is unknown; without a delegate, callers
+        // receive no stop notification and can keep a stream that produces no audio.
+        // https://developer.apple.com/documentation/screencapturekit/scstream/init(filter:configuration:delegate:)
+        let delegate = delegate::StreamDelegate::with(error_callback.clone());
+        let sc_stream = sc::Stream::with_delegate::<(), _>(&filter, &cfg, delegate.as_ref());
         let inner = CapturerInner {
             current_data: vec![],
             config: config.clone(),
             sample_format,
             data_callback: Box::new(data_callback),
-            error_callback: Box::new(error_callback),
+            error_callback,
         };
         let capturer = Capturer::with(inner);
         sc_stream
@@ -233,6 +241,7 @@ impl Device {
         Ok(Stream::new(StreamInner {
             _capturer: capturer,
             sc_stream,
+            _delegate: delegate,
             playing: false,
         }))
     }
@@ -257,6 +266,8 @@ struct StreamInner {
     // Keep capturer alive
     _capturer: Retained<Capturer>,
     sc_stream: Retained<sc::Stream>,
+    // Keep the stop callback alive until after sc_stream is released.
+    _delegate: Retained<delegate::StreamDelegate>,
     playing: bool,
 }
 
@@ -327,7 +338,7 @@ struct CapturerInner {
     config: StreamConfig,
     sample_format: SampleFormat,
     data_callback: Box<dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static>,
-    error_callback: Box<dyn FnMut(StreamError) + Send + 'static>,
+    error_callback: delegate::ErrorCallback,
 }
 
 impl CapturerInner {
@@ -337,7 +348,7 @@ impl CapturerInner {
         let buf_list = match sample_buf.audio_buf_list::<2>() {
             Ok(res) => res,
             Err(e) => {
-                (self.error_callback)(StreamError::BackendSpecific {
+                (self.error_callback.lock().unwrap())(StreamError::BackendSpecific {
                     err: BackendSpecificError {
                         description: format!("{e}"),
                     },
