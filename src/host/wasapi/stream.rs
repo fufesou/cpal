@@ -9,7 +9,6 @@ use std::ptr;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation;
-use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio;
 use windows::Win32::System::SystemServices;
@@ -18,8 +17,6 @@ use windows::Win32::System::Threading;
 pub struct Stream {
     /// The high-priority audio processing thread calling callbacks.
     /// Option used for moving out in destructor.
-    ///
-    /// TODO: Actually set the thread priority.
     thread: Option<JoinHandle<()>>,
 
     // Commands processed by the `run()` method that is currently running.
@@ -269,7 +266,9 @@ fn run_input(
     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    boost_current_thread_priority();
+    if let Err(err) = boost_current_thread_priority() {
+        error_callback(err);
+    }
 
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
@@ -298,7 +297,9 @@ fn run_output(
     data_callback: &mut dyn FnMut(&mut Data, &OutputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    boost_current_thread_priority();
+    if let Err(err) = boost_current_thread_priority() {
+        error_callback(err);
+    }
 
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
@@ -322,16 +323,20 @@ fn run_output(
     }
 }
 
-fn boost_current_thread_priority() {
+// Priority boosting remains best-effort; callers report failure without stopping the stream.
+fn boost_current_thread_priority() -> Result<(), StreamError> {
     unsafe {
-        let thread_id = Threading::GetCurrentThreadId();
-
-        let _ = Threading::SetThreadPriority(
-            HANDLE(thread_id as isize),
+        Threading::SetThreadPriority(
+            Threading::GetCurrentThread(),
             Threading::THREAD_PRIORITY_TIME_CRITICAL,
-        );
+        )
     }
+    .map_err(|err| super::windows_err_to_cpal_err_message(err, "SetThreadPriority failed: "))
 }
+
+#[cfg(test)]
+#[path = "stream_priority_tests.rs"]
+mod priority_tests;
 
 enum ControlFlow {
     Break,
