@@ -71,16 +71,28 @@ mod tests {
         let callback: ErrorCallback = Arc::new(Mutex::new(Box::new(move |error| {
             sender.send(error).unwrap();
         })));
-        let delegate = StreamDelegate::with(callback);
+        let mut delegate = StreamDelegate::with(callback);
         let selector = unsafe { objc::sel_reg_name(c"stream:didStopWithError:".as_ptr().cast()) };
         assert!(delegate.responds_to_sel(selector));
-        delegate.report_stop(&capture_error(sc::error::code::SYSTEM_STOPPED_STREAM));
+        // The filter uses NSObject's initializer; no capture session is started.
+        let filter = unsafe { sc::ContentFilter::cls().new() };
+        let stream =
+            sc::Stream::with_delegate::<(), _>(&filter, &sc::StreamCfg::new(), delegate.as_ref());
+        let stop_error = capture_error(sc::error::code::SYSTEM_STOPPED_STREAM);
+        delegate.stream_did_stop_with_err(&stream, &stop_error);
         let error = receiver.try_recv().unwrap();
         assert!(matches!(error, StreamError::StreamInterrupted { .. }));
         assert!(error.to_string().contains("code=-3821"));
         assert!(error
             .to_string()
             .contains("com.apple.ScreenCaptureKit.SCStreamErrorDomain"));
+        assert!(error
+            .to_string()
+            .contains(&stop_error.localized_description().to_string()));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[test]
