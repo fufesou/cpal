@@ -1,19 +1,29 @@
 use super::*;
 use crate::traits::{DeviceTrait, HostTrait};
-use std::time::{Duration, Instant};
+use std::{
+    ffi::CString,
+    time::{Duration, Instant},
+};
 
 const WORKER_DEADLINE: Duration = Duration::from_secs(2);
 
+#[derive(Debug)]
 enum WorkerExit {
     Termination,
     Finished,
     Panicked,
 }
 
-fn stream(exit: WorkerExit) -> (Stream, Foundation::HANDLE) {
-    let event =
-        unsafe { Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null())) }
-            .unwrap();
+fn stream(exit: WorkerExit) -> (Stream, CString) {
+    let name = CString::new(format!(
+        "Local\\cpal-lifecycle-{}-{exit:?}",
+        std::process::id()
+    ))
+    .unwrap();
+    let event = unsafe {
+        Threading::CreateEventA(None, false, false, windows::core::PCSTR(name.as_ptr() as _))
+    }
+    .unwrap();
     let (tx, rx) = channel();
     let wait_for_exit = !matches!(exit, WorkerExit::Termination);
     let worker = thread::spawn(move || match exit {
@@ -38,19 +48,30 @@ fn stream(exit: WorkerExit) -> (Stream, Foundation::HANDLE) {
             commands: tx,
             pending_scheduled_event: owned_event,
         },
-        event,
+        name,
     )
 }
 
 fn assert_event_closed(exit: WorkerExit) {
-    let (stream, event) = stream(exit);
-    let mut flags = 0;
-    unsafe { Foundation::GetHandleInformation(event, &mut flags) }.unwrap();
+    let (stream, name) = stream(exit);
     drop(stream);
-    assert!(
-        unsafe { Foundation::GetHandleInformation(event, &mut flags) }.is_err(),
-        "Stream destruction leaked its command event"
-    );
+    // Another test can reuse a closed handle value; check the event's identity instead.
+    match unsafe {
+        Threading::OpenEventA(
+            Threading::EVENT_MODIFY_STATE,
+            false,
+            windows::core::PCSTR(name.as_ptr() as _),
+        )
+    } {
+        Ok(event) => {
+            let _event = unsafe { OwnedHandle::from_raw_handle(event.0 as _) };
+            panic!("Stream destruction leaked its command event");
+        }
+        Err(error) => assert_eq!(
+            error.code(),
+            windows::core::HRESULT::from_win32(Foundation::ERROR_FILE_NOT_FOUND.0),
+        ),
+    }
 }
 
 #[test]
