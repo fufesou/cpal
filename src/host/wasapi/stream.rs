@@ -176,7 +176,9 @@ impl Stream {
 impl Drop for Stream {
     #[inline]
     fn drop(&mut self) {
-        // Diagnostic I/O must not interrupt worker and handle cleanup.
+        // eprintln! panics on stderr write errors, e.g. a closed pipe reporting
+        // ERROR_NO_DATA (232), which Rust maps to BrokenPipe. Ignore diagnostic
+        // I/O errors so worker joining and handle cleanup still run.
         if let Err(error) = self.push_command(Command::Terminate) {
             let _ = writeln!(
                 io::stderr().lock(),
