@@ -46,7 +46,7 @@ fn stream(exit: WorkerExit) -> (Stream, CString) {
         Stream {
             thread: Some(worker),
             commands: tx,
-            pending_scheduled_event: owned_event,
+            pending_scheduled_event: Arc::new(owned_event),
         },
         name,
     )
@@ -94,6 +94,45 @@ const MEASURED_CYCLES: usize = 16;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SETTLE_TIME: Duration = Duration::from_millis(100);
+
+#[test]
+#[ignore = "Requires a native F32 output device; run alone with a 60-second process deadline"]
+fn native_callback_can_drop_stream_before_worker_exit() {
+    let host = crate::host::wasapi::Host::new().unwrap();
+    let device = host.default_output_device().unwrap();
+    let supported = device.default_output_config().unwrap();
+    assert_eq!(supported.sample_format(), SampleFormat::F32);
+    let (stream_tx, stream_rx) = channel::<Stream>();
+    let (result_tx, result_rx) = channel();
+    let output = device
+        .build_output_stream(
+            &supported.into(),
+            move |data: &mut [f32], _| {
+                data.fill(0.0);
+                let output = stream_rx.recv_timeout(CALLBACK_TIMEOUT).unwrap();
+                let event = Foundation::HANDLE(output.pending_scheduled_event.as_raw_handle() as _);
+                drop(output);
+                // The worker still needs its command event after this callback returns.
+                result_tx
+                    .send(unsafe { Threading::SetEvent(event) })
+                    .unwrap();
+            },
+            |error| eprintln!("Native callback error: {error}"),
+            None,
+        )
+        .unwrap();
+    output.play().unwrap();
+    stream_tx.send(output).unwrap();
+    result_rx
+        .recv_timeout(CALLBACK_TIMEOUT)
+        .expect("Stream destruction blocked inside its own callback")
+        .expect("Stream destruction closed the live worker's command event");
+    assert_eq!(
+        result_rx.recv_timeout(CALLBACK_TIMEOUT),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "Worker did not exit after callback-thread destruction"
+    );
+}
 
 fn handle_count() -> u32 {
     let mut count = 0;

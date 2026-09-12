@@ -8,7 +8,10 @@ use std::{
     mem,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     ptr,
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc,
+    },
     thread::{self, JoinHandle},
 };
 use windows::Win32::Foundation;
@@ -33,7 +36,7 @@ pub struct Stream {
 
     // This event is signalled after a new entry is added to `commands`, so that the `run()`
     // method can be notified.
-    pending_scheduled_event: OwnedHandle,
+    pending_scheduled_event: Arc<OwnedHandle>,
 }
 
 struct RunContext {
@@ -45,6 +48,9 @@ struct RunContext {
     handles: Vec<Foundation::HANDLE>,
 
     commands: Receiver<Command>,
+
+    // Keep the event alive if Stream is dropped inside its own callback.
+    _pending_scheduled_event: Arc<OwnedHandle>,
 }
 
 // Once we start running the eventloop, the RunContext will not be moved.
@@ -97,13 +103,15 @@ impl Stream {
             Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
         }
         .expect("cpal: could not create input stream event");
-        let owned_event = unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) };
+        let owned_event =
+            Arc::new(unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) });
         let (tx, rx) = channel();
 
         let run_context = RunContext {
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
+            _pending_scheduled_event: Arc::clone(&owned_event),
         };
 
         let thread = thread::Builder::new()
@@ -131,13 +139,15 @@ impl Stream {
             Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
         }
         .expect("cpal: could not create output stream event");
-        let owned_event = unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) };
+        let owned_event =
+            Arc::new(unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) });
         let (tx, rx) = channel();
 
         let run_context = RunContext {
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
+            _pending_scheduled_event: Arc::clone(&owned_event),
         };
 
         let thread = thread::Builder::new()
@@ -173,7 +183,7 @@ impl Drop for Stream {
             eprintln!("cpal: WASAPI termination notification failed: {error}");
         }
         if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
+            if thread.thread().id() != thread::current().id() && thread.join().is_err() {
                 eprintln!("cpal: WASAPI worker panicked during stream processing");
             }
         }
