@@ -1,5 +1,8 @@
 use super::*;
 use crate::traits::{DeviceTrait, HostTrait};
+use std::io::{Read, Write};
+use std::os::windows::process::CommandExt;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
 const WARMUP_CYCLES: usize = 4;
@@ -7,6 +10,65 @@ const MEASURED_CYCLES: usize = 16;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SETTLE_TIME: Duration = Duration::from_millis(100);
+const CHILD_DEADLINE: Duration = Duration::from_secs(10);
+const CLOSED_STDERR_CHILD: &str = "CPAL_TEST_CLOSED_STDERR_CHILD";
+
+#[test]
+#[ignore = "Requires a native F32 output device; run alone with a 60-second process deadline"]
+fn native_drop_survives_closed_stderr() {
+    if std::env::var_os(CLOSED_STDERR_CHILD).is_some() {
+        return closed_stderr_child();
+    }
+    let mut child = ProcessCommand::new(std::env::current_exe().unwrap())
+        .args([
+            "native_drop_survives_closed_stderr",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CLOSED_STDERR_CHILD, "1")
+        .creation_flags(Threading::CREATE_NO_WINDOW.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    child.stdin.take().unwrap().write_all(b"x").unwrap();
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("Closed-stderr child exceeded its deadline");
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    println!("{stdout}");
+    assert!(output.status.success(), "Child failed: {}", output.status);
+    assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
+}
+
+fn closed_stderr_child() {
+    std::io::stdin().read_exact(&mut [0]).unwrap();
+    std::panic::set_hook(Box::new(|info| println!("{info}")));
+    let error = std::io::stderr().write_all(b"probe").unwrap_err();
+    println!("stderr_error={error:?}");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe,
+        "The child must have a broken pipe, not a missing console"
+    );
+    for _ in 0..WARMUP_CYCLES {
+        native_cycle(false);
+    }
+    let before = handle_count();
+    native_cycle(true);
+    let after = handle_count();
+    assert_eq!(after, before, "Closed-stderr destruction leaked handles");
+}
 
 #[test]
 #[ignore = "Requires a native F32 output device; run alone with a 60-second process deadline"]

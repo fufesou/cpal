@@ -4,6 +4,7 @@ use crate::{
     BackendSpecificError, Data, InputCallbackInfo, OutputCallbackInfo, PauseStreamError,
     PlayStreamError, SampleFormat, StreamError,
 };
+use std::io::{self, Write};
 use std::mem;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
@@ -175,12 +176,19 @@ impl Stream {
 impl Drop for Stream {
     #[inline]
     fn drop(&mut self) {
+        // Diagnostic I/O must not interrupt worker and handle cleanup.
         if let Err(error) = self.push_command(Command::Terminate) {
-            eprintln!("cpal: WASAPI termination notification failed: {error}");
+            let _ = writeln!(
+                io::stderr().lock(),
+                "cpal: WASAPI termination notification failed: {error}"
+            );
         }
         if let Some(thread) = self.thread.take() {
             if thread.thread().id() != thread::current().id() && thread.join().is_err() {
-                eprintln!("cpal: WASAPI worker panicked during stream processing");
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "cpal: WASAPI worker panicked during stream processing"
+                );
             }
         }
     }
