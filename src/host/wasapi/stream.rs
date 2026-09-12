@@ -4,7 +4,6 @@ use crate::{
     BackendSpecificError, Data, InputCallbackInfo, OutputCallbackInfo, PauseStreamError,
     PlayStreamError, SampleFormat, StreamError,
 };
-use std::io::{self, Write};
 use std::mem;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
@@ -176,21 +175,10 @@ impl Stream {
 impl Drop for Stream {
     #[inline]
     fn drop(&mut self) {
-        // eprintln! panics on stderr write errors, e.g. a closed pipe reporting
-        // ERROR_NO_DATA (232), which Rust maps to BrokenPipe. Ignore diagnostic
-        // I/O errors so worker joining and handle cleanup still run.
-        if let Err(error) = self.push_command(Command::Terminate) {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "cpal: WASAPI termination notification failed: {error}"
-            );
-        }
+        let _ = self.push_command(Command::Terminate);
         if let Some(thread) = self.thread.take() {
-            if thread.thread().id() != thread::current().id() && thread.join().is_err() {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "cpal: WASAPI worker panicked during stream processing"
-                );
+            if thread.thread().id() != thread::current().id() {
+                let _ = thread.join();
             }
         }
     }
