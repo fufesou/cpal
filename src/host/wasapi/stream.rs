@@ -4,16 +4,12 @@ use crate::{
     BackendSpecificError, Data, InputCallbackInfo, OutputCallbackInfo, PauseStreamError,
     PlayStreamError, SampleFormat, StreamError,
 };
-use std::{
-    mem,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    ptr,
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc,
-    },
-    thread::{self, JoinHandle},
-};
+use std::mem;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::ptr;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio;
