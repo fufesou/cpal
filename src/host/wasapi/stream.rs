@@ -177,6 +177,9 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let _ = self.push_command(Command::Terminate);
         if let Some(thread) = self.thread.take() {
+            // Prevent self-join: Terminate was sent; the thread exits after the current callback
+            // returns. Shared event ownership keeps the handle alive until both Stream and
+            // RunContext release it.
             if thread.thread().id() != thread::current().id() {
                 let _ = thread.join();
             }
