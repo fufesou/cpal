@@ -5,14 +5,20 @@ use crate::{
     PlayStreamError, SampleFormat, StreamError,
 };
 use std::mem;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
-use std::sync::mpsc::{channel, Receiver, SendError, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio;
 use windows::Win32::System::SystemServices;
 use windows::Win32::System::Threading;
+
+#[cfg(test)]
+#[path = "stream_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 pub struct Stream {
     /// The high-priority audio processing thread calling callbacks.
@@ -26,7 +32,7 @@ pub struct Stream {
 
     // This event is signalled after a new entry is added to `commands`, so that the `run()`
     // method can be notified.
-    pending_scheduled_event: Foundation::HANDLE,
+    pending_scheduled_event: Arc<OwnedHandle>,
 }
 
 struct RunContext {
@@ -38,6 +44,9 @@ struct RunContext {
     handles: Vec<Foundation::HANDLE>,
 
     commands: Receiver<Command>,
+
+    // Keep the event alive if Stream is dropped inside its own callback.
+    _pending_scheduled_event: Arc<OwnedHandle>,
 }
 
 // Once we start running the eventloop, the RunContext will not be moved.
@@ -90,12 +99,15 @@ impl Stream {
             Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
         }
         .expect("cpal: could not create input stream event");
+        let owned_event =
+            Arc::new(unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) });
         let (tx, rx) = channel();
 
         let run_context = RunContext {
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
+            _pending_scheduled_event: Arc::clone(&owned_event),
         };
 
         let thread = thread::Builder::new()
@@ -106,7 +118,7 @@ impl Stream {
         Stream {
             thread: Some(thread),
             commands: tx,
-            pending_scheduled_event,
+            pending_scheduled_event: owned_event,
         }
     }
 
@@ -123,12 +135,15 @@ impl Stream {
             Threading::CreateEventA(None, false, false, windows::core::PCSTR(ptr::null()))
         }
         .expect("cpal: could not create output stream event");
+        let owned_event =
+            Arc::new(unsafe { OwnedHandle::from_raw_handle(pending_scheduled_event.0 as _) });
         let (tx, rx) = channel();
 
         let run_context = RunContext {
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
+            _pending_scheduled_event: Arc::clone(&owned_event),
         };
 
         let thread = thread::Builder::new()
@@ -139,27 +154,34 @@ impl Stream {
         Stream {
             thread: Some(thread),
             commands: tx,
-            pending_scheduled_event,
+            pending_scheduled_event: owned_event,
         }
     }
 
     #[inline]
-    fn push_command(&self, command: Command) -> Result<(), SendError<Command>> {
-        self.commands.send(command)?;
+    fn push_command(&self, command: Command) -> Result<(), StreamError> {
+        self.commands
+            .send(command)
+            .map_err(|_| StreamError::DeviceNotAvailable)?;
         unsafe {
-            Threading::SetEvent(self.pending_scheduled_event).unwrap();
+            Threading::SetEvent(Foundation::HANDLE(
+                self.pending_scheduled_event.as_raw_handle() as _,
+            ))
         }
-        Ok(())
+        .map_err(windows_err_to_cpal_err)
     }
 }
 
 impl Drop for Stream {
     #[inline]
     fn drop(&mut self) {
-        if self.push_command(Command::Terminate).is_ok() {
-            self.thread.take().unwrap().join().unwrap();
-            unsafe {
-                let _ = Foundation::CloseHandle(self.pending_scheduled_event);
+        let _ = self.push_command(Command::Terminate);
+        if let Some(thread) = self.thread.take() {
+            // Prevent self-join: Terminate was sent; the thread exits after the current callback
+            // returns. Shared event ownership keeps the handle alive until both Stream and
+            // RunContext release it.
+            if thread.thread().id() != thread::current().id() {
+                let _ = thread.join();
             }
         }
     }
@@ -168,13 +190,21 @@ impl Drop for Stream {
 impl StreamTrait for Stream {
     fn play(&self) -> Result<(), PlayStreamError> {
         self.push_command(Command::PlayStream)
-            .map_err(|_| crate::error::PlayStreamError::DeviceNotAvailable)?;
-        Ok(())
+            .map_err(|error| match error {
+                StreamError::DeviceNotAvailable => PlayStreamError::DeviceNotAvailable,
+                StreamError::BackendSpecific { err } | StreamError::StreamInterrupted { err } => {
+                    PlayStreamError::BackendSpecific { err }
+                }
+            })
     }
     fn pause(&self) -> Result<(), PauseStreamError> {
         self.push_command(Command::PauseStream)
-            .map_err(|_| crate::error::PauseStreamError::DeviceNotAvailable)?;
-        Ok(())
+            .map_err(|error| match error {
+                StreamError::DeviceNotAvailable => PauseStreamError::DeviceNotAvailable,
+                StreamError::BackendSpecific { err } | StreamError::StreamInterrupted { err } => {
+                    PauseStreamError::BackendSpecific { err }
+                }
+            })
     }
 }
 
