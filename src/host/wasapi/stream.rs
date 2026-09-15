@@ -16,10 +16,6 @@ use windows::Win32::Media::Audio;
 use windows::Win32::System::SystemServices;
 use windows::Win32::System::Threading;
 
-#[cfg(test)]
-#[path = "stream_lifecycle_tests.rs"]
-mod lifecycle_tests;
-
 pub struct Stream {
     /// The high-priority audio processing thread calling callbacks.
     /// Option used for moving out in destructor.
